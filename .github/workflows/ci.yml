@@ -1,0 +1,73 @@
+name: CI
+
+# Checks that the crate builds on the platforms DegenView ships, for both renderers. There are no
+# tests (the crate has none upstream) and no Clippy step: the unmodified eframe is not clean under
+# `-D warnings`, and this fork does not touch lint settings.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with the DegenView application's CI.
+  RUST_TOOLCHAIN: "1.100.0"
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check ${{ matrix.name }} (${{ matrix.renderer }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        renderer: [wgpu, glow]
+        include:
+          - os: macos-latest
+            name: macos
+          - os: ubuntu-latest
+            name: linux
+          - renderer: wgpu
+            flags: ""
+          - renderer: glow
+            flags: "--no-default-features --features glow,x11,wayland"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.name }}-${{ matrix.renderer }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libssl-dev pkg-config
+
+      - name: Check
+        env:
+          FLAGS: ${{ matrix.flags }}
+        run: cargo check $FLAGS
+
+      # Proves the published package contains what it should and builds from the packaged files.
+      - name: Package
+        if: matrix.renderer == 'wgpu' && runner.os == 'Linux'
+        run: cargo package
