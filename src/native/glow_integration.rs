@@ -126,6 +126,13 @@ struct Viewport {
     info: ViewportInfo,
     actions_requested: Vec<egui_winit::ActionRequested>,
 
+    /// The app asked for this viewport to be hidden, by its [`ViewportBuilder`] or by
+    /// [`egui::ViewportCommand::Visible`].
+    ///
+    /// This is not [`ViewportInfo::visible`]: winit cannot tell whether a Wayland window is shown,
+    /// so there it reports `visible() == None` (shown) whatever the app asked for.
+    hidden: bool,
+
     /// Any not yet applied deltas for this viewport.
     pending_delta: TexturesDelta,
 
@@ -150,10 +157,16 @@ impl Viewport {
         self.deferred_commands.append(&mut commands);
 
         if let Some(window) = &self.window {
+            let commands = core::mem::take(&mut self.deferred_commands);
+            for command in &commands {
+                if let egui::ViewportCommand::Visible(visible) = command {
+                    self.hidden = !visible;
+                }
+            }
             egui_winit::process_viewport_commands(
                 egui_ctx,
                 &mut self.info,
-                core::mem::take(&mut self.deferred_commands),
+                commands,
                 window,
                 &mut self.actions_requested,
             );
@@ -601,7 +614,7 @@ impl GlowWinitRunning<'_> {
             }
         }
 
-        let (raw_input, viewport_ui_cb, is_visible, show_ui) = {
+        let (raw_input, viewport_ui_cb, paint, show_ui) = {
             let mut glutin = self.glutin.borrow_mut();
             let egui_ctx = glutin.egui_ctx.clone();
             let Some(viewport) = glutin.viewports.get_mut(&viewport_id) else {
@@ -613,6 +626,13 @@ impl GlowWinitRunning<'_> {
             egui_winit::update_viewport_info(&mut viewport.info, &egui_ctx, window, false);
 
             let is_visible = viewport.info.visible().unwrap_or(true);
+
+            // Wayland cannot hide a toplevel: a surface that never gets a buffer stays unmapped,
+            // which is the only hidden state there. Presenting a viewport the app hid would map it,
+            // and gate its redraws on frame callbacks that the compositor may withhold for a window
+            // nobody sees (minimized, or on another virtual desktop). So we still run its ui pass,
+            // but never paint it.
+            let paint = is_visible && !(viewport.hidden && is_wayland(window));
 
             let Some(egui_winit) = viewport.egui_winit.as_mut() else {
                 return Ok(EventResult::Wait);
@@ -632,7 +652,7 @@ impl GlowWinitRunning<'_> {
                 .map(|(id, viewport)| (*id, viewport.info.clone()))
                 .collect();
 
-            (raw_input, viewport_ui_cb, is_visible, show_ui)
+            (raw_input, viewport_ui_cb, paint, show_ui)
         };
 
         if !show_ui {
@@ -697,7 +717,7 @@ impl GlowWinitRunning<'_> {
         let has_many_viewports = self.glutin.borrow().viewports.len() > 1;
         let clear_before_update = !has_many_viewports; // HACK: for some reason, an early clear doesn't "take" on Mac with multiple viewports.
 
-        if is_visible && clear_before_update {
+        if paint && clear_before_update {
             // clear before we call update, so users can paint between clear-color and egui windows:
 
             let mut glutin = self.glutin.borrow_mut();
@@ -779,7 +799,7 @@ impl GlowWinitRunning<'_> {
 
         egui_winit.handle_platform_output_with_event_loop(&window, event_loop, platform_output);
 
-        if is_visible {
+        if paint {
             let clipped_primitives = integration.egui_ctx.tessellate(shapes, pixels_per_point);
 
             {
@@ -1199,6 +1219,7 @@ impl GlutinWindowContext {
                 deferred_commands: vec![],
                 info: viewport_info,
                 actions_requested: Default::default(),
+                hidden: native_options.viewport.visible == Some(false),
                 pending_delta: Default::default(),
                 viewport_ui_cb: None,
                 gl_surface: None,
@@ -1536,6 +1557,7 @@ fn initialize_or_update_viewport(
             entry.insert(Viewport {
                 ids,
                 class,
+                hidden: builder.visible == Some(false),
                 builder,
                 deferred_commands: vec![],
                 info: Default::default(),
@@ -1574,6 +1596,14 @@ fn initialize_or_update_viewport(
             entry.into_mut()
         }
     }
+}
+
+/// Is this window a Wayland toplevel?
+fn is_wayland(window: &Window) -> bool {
+    matches!(
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(raw_window_handle::RawWindowHandle::Wayland(_))
+    )
 }
 
 /// Is this viewport, or any of its (transitive) descendant viewports, visible?

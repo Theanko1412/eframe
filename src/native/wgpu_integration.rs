@@ -102,6 +102,13 @@ pub struct Viewport {
     info: ViewportInfo,
     actions_requested: Vec<ActionRequested>,
 
+    /// The app asked for this viewport to be hidden, by its [`ViewportBuilder`] or by
+    /// [`egui::ViewportCommand::Visible`].
+    ///
+    /// This is not [`ViewportInfo::visible`]: winit cannot tell whether a Wayland window is shown,
+    /// so there it reports `visible() == None` (shown) whatever the app asked for.
+    hidden: bool,
+
     /// Any not yet applied deltas for this viewport.
     pending_delta: TexturesDelta,
 
@@ -346,6 +353,7 @@ impl<'app> WgpuWinitApp<'app> {
                 deferred_commands: vec![],
                 info: viewport_info,
                 actions_requested: Default::default(),
+                hidden: self.native_options.viewport.visible == Some(false),
                 viewport_ui_cb: None,
                 window: Some(window),
                 egui_winit: Some(egui_winit),
@@ -625,7 +633,7 @@ impl WgpuWinitRunning<'_> {
         let mut frame_timer = crate::stopwatch::Stopwatch::new();
         frame_timer.start();
 
-        let (viewport_ui_cb, raw_input, is_visible, show_ui) = {
+        let (viewport_ui_cb, raw_input, paint, show_ui) = {
             profiling::scope!("Prepare");
             let mut shared_lock = shared.borrow_mut();
 
@@ -671,6 +679,13 @@ impl WgpuWinitRunning<'_> {
 
             let is_visible = viewport.info.visible().unwrap_or(true);
 
+            // Wayland cannot hide a toplevel: a surface that never gets a buffer stays unmapped,
+            // which is the only hidden state there. Presenting a viewport the app hid would map it,
+            // and gate its redraws on frame callbacks that the compositor may withhold for a window
+            // nobody sees (minimized, or on another virtual desktop). So we still run its ui pass,
+            // but never paint it.
+            let paint = is_visible && !(viewport.hidden && is_wayland(window));
+
             {
                 profiling::scope!("set_window");
                 pollster::block_on(painter.set_window(viewport_id, Some(Arc::clone(window))))?;
@@ -693,7 +708,7 @@ impl WgpuWinitRunning<'_> {
 
             painter.handle_screenshots(&mut raw_input.events);
 
-            (viewport_ui_cb, raw_input, is_visible, show_ui)
+            (viewport_ui_cb, raw_input, paint, show_ui)
         };
 
         if !show_ui {
@@ -796,7 +811,7 @@ impl WgpuWinitRunning<'_> {
 
         egui_winit.handle_platform_output_with_event_loop(window, event_loop, platform_output);
 
-        let vsync_secs = if is_visible {
+        let vsync_secs = if paint {
             let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
 
             let mut screenshot_commands = vec![];
@@ -1038,10 +1053,16 @@ impl Viewport {
         self.deferred_commands.append(&mut commands);
 
         if let Some(window) = self.window.as_ref() {
+            let commands = core::mem::take(&mut self.deferred_commands);
+            for command in &commands {
+                if let egui::ViewportCommand::Visible(visible) = command {
+                    self.hidden = !visible;
+                }
+            }
             egui_winit::process_viewport_commands(
                 egui_ctx,
                 &mut self.info,
-                core::mem::take(&mut self.deferred_commands),
+                commands,
                 window,
                 &mut self.actions_requested,
             );
@@ -1115,6 +1136,14 @@ fn create_window(
     let window = egui_winit::create_window(egui_ctx, event_loop, &viewport_builder)?;
     epi_integration::apply_window_settings(&window, window_settings);
     Ok((window, viewport_builder))
+}
+
+/// Is this window a Wayland toplevel?
+fn is_wayland(window: &Window) -> bool {
+    matches!(
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(raw_window_handle::RawWindowHandle::Wayland(_))
+    )
 }
 
 /// Is this viewport, or any of its (transitive) descendant viewports, visible?
@@ -1345,6 +1374,7 @@ fn initialize_or_update_viewport<'a>(
             entry.insert(Viewport {
                 ids,
                 class,
+                hidden: builder.visible == Some(false),
                 builder,
                 deferred_commands: vec![],
                 info: Default::default(),
