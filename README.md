@@ -1,63 +1,70 @@
-# eframe: the [`egui`](https://github.com/emilk/egui) framework
+# degenview-eframe
 
-[![Latest version](https://img.shields.io/crates/v/eframe.svg)](https://crates.io/crates/eframe)
-[![Documentation](https://docs.rs/eframe/badge.svg)](https://docs.rs/eframe)
-![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Apache](https://img.shields.io/badge/license-Apache-blue.svg)
+> **This is a fork.** It is [`eframe`](https://github.com/emilk/egui/tree/main/crates/eframe) 0.36.2
+> from the [egui](https://github.com/emilk/egui) project (Emil Ernerfeldt and contributors) with one
+> small Wayland fix, published for [DegenView](https://github.com/degenview/degenview). It is not
+> affiliated with or endorsed by the egui project. If you do not need the fix, use
+> [`eframe`](https://crates.io/crates/eframe).
 
-`eframe` is the official framework library for writing apps using [`egui`](https://github.com/emilk/egui). The app can be compiled both to run natively (for Linux, Mac, Windows, and Android) or as a web app (using [Wasm](https://en.wikipedia.org/wiki/WebAssembly)).
+## What it changes
 
-To get started, see the [examples](https://github.com/emilk/egui/tree/main/examples).
-To learn how to set up `eframe` for web and native, go to <https://github.com/emilk/eframe_template/> and follow the instructions there!
+On Wayland, a viewport the app hid is no longer painted or presented.
 
-There is also a tutorial video at <https://www.youtube.com/watch?v=NtUkr_z7l84>.
+Wayland cannot hide a toplevel window. Upstream eframe presents every viewport on every pass, which
+maps a viewport the app asked to hide, and winit then gates that window's redraws on frame callbacks
+that compositors withhold from a window nobody sees (minimized, or on another virtual desktop). A
+hidden root viewport that drives other viewports then stalls until the user makes it visible again:
+dialogs that should close stay open, new windows do not open. This is
+[degenview/degenview#622](https://github.com/degenview/degenview/issues/622).
 
-For how to use `egui`, see [the egui docs](https://docs.rs/egui).
+With this fork, `Viewport::hidden` records that the app asked for the viewport to be hidden (through
+`NativeOptions::viewport` or the viewport builder, and then through every
+`ViewportCommand::Visible`). On Wayland such a viewport still runs its ui pass, so `App::update` and
+the viewports it creates keep working, but it is not tessellated, painted or presented. Its surface
+never gets a buffer and stays unmapped. Its texture deltas wait for the next painted viewport, as
+they already do for a minimized one. Other platforms and visible viewports behave as in upstream.
 
----
+The whole change is the second commit of this repository, in `src/native/wgpu_integration.rs` and
+`src/native/glow_integration.rs` (same shape in both renderers). Everything else in `src/` is
+byte-identical to upstream.
 
-`eframe` defaults to using [wgpu](https://crates.io/crates/wgpu) for rendering (with an option to change to [glow](https://crates.io/crates/glow)), and on native it uses [`egui-winit`](https://github.com/emilk/egui/tree/main/crates/egui-winit).
+## Base
 
-To use on Linux, first run:
+| | |
+| --- | --- |
+| Upstream | `eframe` 0.36.2, `crates/eframe` of <https://github.com/emilk/egui> (commit `49682f8baa058bf49e011035cfbd6e825f88a5ef`, from the crate's `.cargo_vcs_info.json`) |
+| Imported from | <https://static.crates.io/crates/eframe/eframe-0.36.2.crate> |
+| sha256 of that file | `55ad41fac6e3149abb4866e93df37dbd33baa95db525c3368c944584e95a5dc2` |
+| Version here | `0.36.2`, the same number, so a dependency on this crate names the eframe release it is based on |
 
+The first commit of this repository is the extracted crate, unmodified; `git diff` from it shows
+every change. Besides the source fix, the package metadata in `Cargo.toml` is ours (name,
+description, repository, keywords, `include`), `Cargo.toml.orig`, `.cargo_vcs_info.json` and
+`Cargo.lock` of the tarball are not kept (the first two describe upstream's workspace, the lock file
+is not used by dependents), and the license texts are added (the crates.io tarball does not ship
+them).
+
+## Use
+
+The library is still called `eframe`, so `use eframe::...` keeps working:
+
+```toml
+[dependencies]
+eframe = { package = "degenview-eframe", version = "=0.36.2", features = ["persistence"] }
 ```
-sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
-```
 
-You need to either use `edition = "2024"`, or set `resolver = "2"` in the `[workspace]` section of your to-level `Cargo.toml`. See [this link](https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html) for more info.
+Features are those of eframe 0.36.2. Pin the version exactly: this crate follows DegenView's needs,
+not upstream's release schedule.
 
-You can opt-in to the using [`egui_glow`](https://github.com/emilk/egui/tree/main/crates/egui_glow) for rendering by enabling the `glow` feature and setting `NativeOptions::renderer` to `Renderer::Glow`.
+## Retirement
 
-## Alternatives
-`eframe` is not the only way to write an app using `egui`! You can also try [`egui-miniquad`](https://github.com/not-fl3/egui-miniquad), [`bevy_egui`](https://github.com/mvlabat/bevy_egui), [`egui_sdl2_gl`](https://github.com/ArjunNair/egui_sdl2_gl), and others.
+The crate goes away once egui ships an equivalent fix; DegenView then depends on `eframe` again. It
+will not be updated for new egui releases unless DegenView still needs it. Other changes belong in
+egui, not here.
 
-You can also use `egui_glow` and [`winit`](https://github.com/rust-windowing/winit) to build your own app as demonstrated in <https://github.com/emilk/egui/blob/main/crates/egui_glow/examples/pure_glow.rs>.
+## License
 
-
-## Limitations when running egui on the web
-`eframe` and egui compiles to Wasm using either WebGPU (when available) or WebGL2 for rendering, and almost nothing else from the web tech stack. This has some benefits, but also produces some challenges and serious downsides.
-
-* Rendering: Getting pixel-perfect rendering right on the web is very difficult.
-* Search: you cannot search an egui web page like you would a normal web page.
-* Bringing up an on-screen keyboard on mobile: there is no JS function to do this, so `eframe` fakes it by adding some invisible DOM elements. It doesn't always work.
-* Mobile text editing is not as good as for a normal web app.
-* No integration with browser settings for colors and fonts.
-* Accessibility: There is an experimental screen reader for `eframe`, but it has to be enabled explicitly. There is no JS function to ask "Does the user want a screen reader?" (and there should probably not be such a function, due to user tracking/integrity concerns). `egui` supports [AccessKit](https://github.com/AccessKit/accesskit), but as of early 2024, AccessKit lacks a Web backend.
-
-In many ways, `eframe` is trying to make the browser do something it wasn't designed to do (though there are many things browser vendors could do to improve how well libraries like egui work).
-
-The suggested use for `eframe` are for web apps where performance and responsiveness are more important than accessibility and mobile text editing.
-
-
-## Companion crates
-Not all rust crates work when compiled to Wasm, but here are some useful crates have been designed to work well both natively and as Wasm:
-
-* Audio: [`cpal`](https://github.com/RustAudio/cpal)
-* File dialogs: [rfd](https://docs.rs/rfd/latest/rfd/)
-* HTTP client: [`ehttp`](https://github.com/emilk/ehttp) and [`reqwest`](https://github.com/seanmonstar/reqwest)
-* Time: [`chrono`](https://github.com/chronotope/chrono)
-* WebSockets: [`ewebsock`](https://github.com/rerun-io/ewebsock)
-
-
-## Name
-The _frame_ in `eframe` stands both for the frame in which your `egui` app resides and also for "framework" (`eframe` is a framework, `egui` is a library).
+`MIT OR Apache-2.0`, as upstream. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE), copied from <https://github.com/emilk/egui>. The code is
+copyrighted by Emil Ernerfeldt and the egui contributors; the fix is contributed under the same
+terms.
